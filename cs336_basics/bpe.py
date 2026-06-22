@@ -9,12 +9,6 @@ from collections import defaultdict, Counter
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-class Node:
-
-    def __init__(self, val=None):
-        self.val = val
-        self.next = None
-
 def merge_pair(word: tuple[bytes], pair: tuple[bytes]):
     out = []
 
@@ -47,6 +41,16 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str]):
     with open(input_path, "r") as f:
         corpus = f.read()
     
+    # Remove special token
+    special_tokens.sort()
+    special_pat = "|".join(
+        re.escape(special_token)
+        for special_token in special_tokens
+    )
+
+    chunks = re.split(f"({special_pat})", corpus) if special_pat else [corpus]
+
+    
     for byte in range(256):
         vocab[byte] = bytes([byte])
 
@@ -55,13 +59,14 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str]):
     for special_token in special_tokens:
         vocab[next_token_id] = special_token.encode('utf-8')
         next_token_id += 1
-        breakpoint()
 
     # pretokenize
     freq = defaultdict(int)
-    for m in re.finditer(PAT, corpus):
-        word_byte = m.group().encode("utf-8")
-        freq[tuple(bytes([b]) for b in word_byte)]+=1
+    for chunk in chunks:
+        if chunk not in special_tokens:
+            for m in re.finditer(PAT, chunk):
+                word_byte = m.group().encode("utf-8")
+                freq[tuple(bytes([b]) for b in word_byte)]+=1
 
     # Merges
     while len(vocab) < vocab_size:
