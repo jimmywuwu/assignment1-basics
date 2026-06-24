@@ -120,7 +120,6 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str], num_pr
     vocab: dict[int, bytes] = {}
     merges:  list[tuple[int, int]] = []
 
-
     # Remove special token
     special_tokens.sort()
     special_pat = "|".join(
@@ -154,16 +153,12 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str], num_pr
         master_pat = re.compile(PAT)
 
     # pretokenize
-
-    num_processes = 15
-
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-
     stat = Counter()
     t0 = time.perf_counter()
     tasks = [(input_path, master_pat, special_tokens, start_offset, end_offset) for start_offset, end_offset in zip(boundaries[:-1], boundaries[1:])]
-    with Pool(processes=cpu_count()) as pool:
+    with Pool(processes=num_processes) as pool:
         t0 = time.perf_counter()
         freq_stats = pool.starmap(_pretokenize, tasks)
         t1 = time.perf_counter()
@@ -188,18 +183,26 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str], num_pr
     pair_to_words: dict[tuple[int, int], set[int]] = defaultdict(set)
     pair_count = Counter()
     
+    t0_building_invert_index = time.perf_counter()
     for word_id, word_bytes in words.items():
         freq = word_freq[word_id]
 
         for pair in zip(word_bytes, word_bytes[1:]):
             pair_count[pair] += freq
             pair_to_words[pair].add(word_id)
+    t1_building_invert_index = time.perf_counter()
+    print(f"[building_invert_index] {t1_building_invert_index - t0_building_invert_index:.2f} sec")
+
+    print(len(words))
+    print(len(pair_count))
 
     while len(vocab) < vocab_size:
-        t0 = time.perf_counter()
+        t0_loop = time.perf_counter()
 
         if not pair_count:
             break
+
+        t0_max = time.perf_counter()
 
         best_pair, best_freq = max(
             pair_count.items(),
@@ -209,32 +212,78 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str], num_pr
             )
         )
 
+        t1_max = time.perf_counter()
+
+        print(
+            f"[choosing max] {t1_max - t0_max:.2f} sec"
+        )
+
         if best_freq <= 0:
             break
 
         new_token_id = next_token_id
+
         vocab[new_token_id] = (
             vocab[best_pair[0]]
             + vocab[best_pair[1]]
         )
+
         merges.append(best_pair)
         next_token_id += 1
 
-        affected_word_ids = list(pair_to_words[best_pair])
+        affected_word_ids = list(
+            pair_to_words[best_pair]
+        )
+
+        print(
+            f"best_pair={best_pair} "
+            f"affected={len(affected_word_ids):,}"
+        )
+
+        remove_time = 0.0
+        merge_time = 0.0
+        add_time = 0.0
+
+        discard_time = 0.0
+        add_set_time = 0.0
 
         for word_id in affected_word_ids:
+
             old_word = words[word_id]
             count = word_freq[word_id]
 
+            # ----------------------------------
             # remove old pairs
+            # ----------------------------------
+            t0 = time.perf_counter()
+
             for pair in get_pairs(old_word):
+
                 pair_count[pair] -= count
+
                 if pair_count[pair] <= 0:
                     del pair_count[pair]
 
-                pair_to_words[pair].discard(word_id)
+                t_discard = time.perf_counter()
 
+                pair_to_words[pair].discard(
+                    word_id
+                )
+
+                discard_time += (
+                    time.perf_counter()
+                    - t_discard
+                )
+
+            remove_time += (
+                time.perf_counter() - t0
+            )
+
+            # ----------------------------------
             # merge word
+            # ----------------------------------
+            t0 = time.perf_counter()
+
             new_word = merge_pair(
                 old_word,
                 best_pair,
@@ -243,13 +292,51 @@ def train_bpe(input_path:str, vocab_size:int , special_tokens: list[str], num_pr
 
             words[word_id] = new_word
 
+            merge_time += (
+                time.perf_counter() - t0
+            )
+
+            # ----------------------------------
             # add new pairs
+            # ----------------------------------
+            t0 = time.perf_counter()
+
             for pair in get_pairs(new_word):
+
                 pair_count[pair] += count
-                pair_to_words[pair].add(word_id)
-        
-        t1 = time.perf_counter()
-        print(f"[Merge] {t1 - t0:.2f} sec")
+
+                t_add = time.perf_counter()
+
+                pair_to_words[pair].add(
+                    word_id
+                )
+
+                add_set_time += (
+                    time.perf_counter()
+                    - t_add
+                )
+
+            add_time += (
+                time.perf_counter() - t0
+            )
+
+        print(
+            f"[Remove Pairs] {remove_time:.2f}s "
+            f"[Merge Word] {merge_time:.2f}s "
+            f"[Add Pairs] {add_time:.2f}s"
+        )
+
+        print(
+            f"[discard()] {discard_time:.2f}s "
+            f"[add()] {add_set_time:.2f}s"
+        )
+
+        t1_loop = time.perf_counter()
+
+        print(
+            f"[Merge] "
+            f"{t1_loop - t0_loop:.2f} sec"
+        )
         
     return vocab, merges
 
@@ -351,5 +438,3 @@ if __name__ == "__main__":
     test_string = "s"
     encoded_ids = tokenizer.encode(test_string)
     decoded_string = tokenizer.decode(encoded_ids)
-    breakpoint()
-    pass
