@@ -1,3 +1,5 @@
+pip install -e .
+
 mkdir -p data
 cd data
 

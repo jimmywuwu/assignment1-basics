@@ -2,7 +2,7 @@ from typing import Iterable, Iterator
 
 import regex as re
 from collections import defaultdict, Counter
-from pretokenization_example import find_chunk_boundaries
+from cs336_basics.pretokenization_example import find_chunk_boundaries
 from multiprocessing import Pool, cpu_count
 import time
 import pickle
@@ -290,10 +290,31 @@ class BPETokenizer:
     def encode(self, text: str) -> list[int]:
         ids = []
 
-        for m in re.finditer(PAT, text):
-            word = m.group()
-            ids.extend(self.encode_word(word))
+        if self.special_tokens:
+            special_pat = "|".join(
+                re.escape(token)
+                for token in sorted(
+                    self.special_tokens,
+                    key=len,
+                    reverse=True,
+                )
+            )
 
+            parts = re.split(f"({special_pat})", text)
+        else:
+            parts = [text]
+
+        for part in parts:
+            if not part:
+                continue
+            
+            if self.special_tokens and part in self.special_tokens:
+                ids.append(self.bytes_to_id[part.encode('utf-8')])
+                continue
+
+            for m in re.finditer(PAT, part):
+                word = m.group()
+                ids.extend(self.encode_word(word))
         return ids
     
     def encode_word(self, word: str):
@@ -302,24 +323,24 @@ class BPETokenizer:
         for a, b in self.merges:
             new_tokens = []
             i = 0
-
             while i < len(tokens):
-                if i < len(tokens) - 1 and tokens[i] == self.vocab[a] and tokens[i + 1] == self.vocab[b]:
-                    new_tokens.append(self.vocab[a] + self.vocab[b])
+                if i < len(tokens) - 1 and tokens[i] == a and tokens[i + 1] == b:
+                    new_tokens.append(a + b)
                     i += 2
                 else:
                     new_tokens.append(tokens[i])
                     i += 1
 
             tokens = new_tokens
-
         return [self.bytes_to_id[tok] for tok in tokens]
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        pass
+        for text in iterable:
+            for token in self.encode(text):           
+                yield token
 
     def decode(self, ids: list[int]) -> str:
-        return "".join([self.vocab[token_id].decode('utf-8') for token_id in ids])
+        return (b"".join([self.vocab[token_id] for token_id in ids])).decode("utf-8",  errors="replace")
 
 
 if __name__ == "__main__":
@@ -327,7 +348,8 @@ if __name__ == "__main__":
     merges_file = "tinystories_bpe_merges.pkl"
     
     tokenizer = BPETokenizer.from_files(vocab_file, merges_file, ["<|endoftext|>"])
-    print(tokenizer.encode("dolphins cough"))
-    print(tokenizer.decode([100, 1860, 1520, 1493, 6230]))
+    test_string = "s"
+    encoded_ids = tokenizer.encode(test_string)
+    decoded_string = tokenizer.decode(encoded_ids)
     breakpoint()
     pass
