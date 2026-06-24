@@ -1,8 +1,11 @@
+from typing import Iterable, Iterator
+
 import regex as re
 from collections import defaultdict, Counter
 from pretokenization_example import find_chunk_boundaries
 from multiprocessing import Pool, cpu_count
 import time
+import pickle
 
 # def decode_utf8_bytes_to_str_wrong(bytestring: bytes):
 #         return "".join([bytes([b]).decode("utf-8") for b in bytestring])
@@ -265,28 +268,66 @@ def _pretokenize(file_path, master_pat, special_tokens, start_offset, end_offset
 
     return freq
 
-# class BPETokenizer:
+class BPETokenizer:
 
-#     def __init__(self, vocab, merges, special_tokens=None):
-#         self.vocab = vocab
-#         self.merges = merges
-#         self.special_tokens = special_tokens
+    def __init__(self, vocab, merges, special_tokens=None):
+        self.vocab = vocab
+        self.bytes_to_id = {
+            v:k
+            for k,v in vocab.items()
+        }
+        self.merges = merges
+        self.special_tokens = special_tokens
 
-#     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
-#         # vocab =
-#         # merges =  
-#         return BPETokenizer(vocab, merges, sprcial_token)
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        with open(vocab_filepath, 'rb') as f:
+            vocab = pickle.load(f)
+        with open(merges_filepath, 'rb') as f:
+            merges = pickle.load(f)
+        return BPETokenizer(vocab, merges, special_tokens)
 
-#     def encode(self, text: str) -> list[int]:
-#         pass
-#     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-#         pass
-#     def decode(self, ids: list[int]) -> str:
-#         pass
+    def encode(self, text: str) -> list[int]:
+        ids = []
+
+        for m in re.finditer(PAT, text):
+            word = m.group()
+            ids.extend(self.encode_word(word))
+
+        return ids
+    
+    def encode_word(self, word: str):
+        # 1. word -> bytes
+        tokens = [bytes([b]) for b in word.encode("utf-8")]
+        for a, b in self.merges:
+            new_tokens = []
+            i = 0
+
+            while i < len(tokens):
+                if i < len(tokens) - 1 and tokens[i] == self.vocab[a] and tokens[i + 1] == self.vocab[b]:
+                    new_tokens.append(self.vocab[a] + self.vocab[b])
+                    i += 2
+                else:
+                    new_tokens.append(tokens[i])
+                    i += 1
+
+            tokens = new_tokens
+
+        return [self.bytes_to_id[tok] for tok in tokens]
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        pass
+
+    def decode(self, ids: list[int]) -> str:
+        return "".join([self.vocab[token_id].decode('utf-8') for token_id in ids])
+
 
 if __name__ == "__main__":
-    # corpus = "low low low low low lower lower widest widest widest newest newest newest newest newest newest" 
-
-    # print(train_bpe("a", 2560, []))
-
-    pass    
+    vocab_file = "tinystories_bpe_vocab.pkl"
+    merges_file = "tinystories_bpe_merges.pkl"
+    
+    tokenizer = BPETokenizer.from_files(vocab_file, merges_file, ["<|endoftext|>"])
+    print(tokenizer.encode("dolphins cough"))
+    print(tokenizer.decode([100, 1860, 1520, 1493, 6230]))
+    breakpoint()
+    pass
