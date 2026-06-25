@@ -11,7 +11,7 @@ def main():
     with open("stat.pickle", "rb") as f:
         stat = pickle.load(f)
     
-    vocab_sizes = [100_00, 320_00]
+    vocab_sizes = [320_00]
 
     for vocab_size in vocab_sizes:
 
