@@ -103,7 +103,7 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    return my_scale_dot_product_attention(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -137,7 +137,9 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    attention = MultiHeadSelfAttention(d_model, num_heads)
+    attention.load_state_dict({"Wq.weights":q_proj_weight, "Wk.weights":k_proj_weight, "Wv.weights": v_proj_weight, "Wo.weights":o_proj_weight})
+    return attention.forward(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -177,7 +179,9 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    causal_attention = MultiHeadSelfAttentionWithRope(d_model, num_heads, max_seq_len)
+    causal_attention.load_state_dict({"Wq.weights":q_proj_weight, "Wk.weights":k_proj_weight, "Wv.weights": v_proj_weight, "Wo.weights":o_proj_weight})
+    return causal_attention.forward(in_features)
 
 
 def run_rope(
@@ -199,8 +203,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
-
+    rope = MyRoPE(theta, d_k, max_seq_len)
+    return rope.forward(in_query_or_key, token_positions)
 
 def run_transformer_block(
     d_model: int,
@@ -272,7 +276,19 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    transformer = MyTransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta)
+    transformer.load_state_dict({
+            "ffn.w1": weights['ffn.w1.weight'],
+            "ffn.w2": weights['ffn.w2.weight'], 
+            "ffn.w3": weights['ffn.w3.weight'], 
+            "ln1.gain":weights['ln1.weight'], 
+            "ln2.gain": weights['ln2.weight'], 
+            "attn.Wq.weights": weights['attn.q_proj.weight'], 
+            "attn.Wk.weights": weights['attn.k_proj.weight'], 
+            "attn.Wv.weights": weights['attn.v_proj.weight'], 
+            "attn.Wo.weights": weights['attn.output_proj.weight']
+        })
+    return transformer.forward(in_features)
 
 
 def run_transformer_lm(
@@ -354,7 +370,46 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+
+    llm = MyLLM(vocab_size, d_model, context_length, num_layers, num_heads, d_ff, rope_theta)
+    llm.load_state_dict(
+        {
+            "embedding.weights": weights['token_embeddings.weight'],
+            "layers.0.ffn.w1": weights['layers.0.ffn.w1.weight'],
+            "layers.0.ffn.w2": weights['layers.0.ffn.w2.weight'], 
+            "layers.0.ffn.w3": weights['layers.0.ffn.w3.weight'], 
+            "layers.0.ln1.gain":weights['layers.0.ln1.weight'], 
+            "layers.0.ln2.gain": weights['layers.0.ln2.weight'], 
+            "layers.0.attn.Wq.weights": weights['layers.0.attn.q_proj.weight'], 
+            "layers.0.attn.Wk.weights": weights['layers.0.attn.k_proj.weight'], 
+            "layers.0.attn.Wv.weights": weights['layers.0.attn.v_proj.weight'], 
+            "layers.0.attn.Wo.weights": weights['layers.0.attn.output_proj.weight'],
+
+            "layers.1.ffn.w1": weights['layers.1.ffn.w1.weight'],
+            "layers.1.ffn.w2": weights['layers.1.ffn.w2.weight'], 
+            "layers.1.ffn.w3": weights['layers.1.ffn.w3.weight'], 
+            "layers.1.ln1.gain":weights['layers.1.ln1.weight'], 
+            "layers.1.ln2.gain": weights['layers.1.ln2.weight'], 
+            "layers.1.attn.Wq.weights": weights['layers.1.attn.q_proj.weight'], 
+            "layers.1.attn.Wk.weights": weights['layers.1.attn.k_proj.weight'], 
+            "layers.1.attn.Wv.weights": weights['layers.1.attn.v_proj.weight'], 
+            "layers.1.attn.Wo.weights": weights['layers.1.attn.output_proj.weight'],
+
+            "layers.2.ffn.w1": weights['layers.2.ffn.w1.weight'],
+            "layers.2.ffn.w2": weights['layers.2.ffn.w2.weight'], 
+            "layers.2.ffn.w3": weights['layers.2.ffn.w3.weight'], 
+            "layers.2.ln1.gain":weights['layers.2.ln1.weight'], 
+            "layers.2.ln2.gain": weights['layers.2.ln2.weight'], 
+            "layers.2.attn.Wq.weights": weights['layers.2.attn.q_proj.weight'], 
+            "layers.2.attn.Wk.weights": weights['layers.2.attn.k_proj.weight'], 
+            "layers.2.attn.Wv.weights": weights['layers.2.attn.v_proj.weight'], 
+            "layers.2.attn.Wo.weights": weights['layers.2.attn.output_proj.weight'],
+
+            "ln_final.gain": weights['ln_final.weight'],
+            "lm_head.weights" : weights["lm_head.weight"]
+        }
+    )
+    return llm.forward(in_indices)
 
 
 def run_rmsnorm(
@@ -433,7 +488,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return my_softmax(in_features, dim)
 
 
 def run_cross_entropy(

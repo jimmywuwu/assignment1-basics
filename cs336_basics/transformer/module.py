@@ -30,7 +30,7 @@ class MyLinear(torch.nn.Module):
         )
     
     def forward(self, x:torch.Tensor):
-        return torch.einsum("bsi,oi->bso", x, self.weights)
+        return torch.einsum("...i,oi->...o", x, self.weights)
 
 
 class MyEmbedding(torch.nn.Module):
@@ -127,3 +127,152 @@ class MySwiGLU(torch.nn.Module):
         gate = self.silu.forward(torch.einsum("fd,btd->btf",self.w1, x))
         linear = torch.einsum("fd,btd->btf",self.w3, x)
         return torch.einsum("df,btf->btd",self.w2, gate * linear)
+
+class MyRoPE(nn.Module):
+
+    def __init__(self, theta:float, d_k: int, max_seq_len, device=None):
+        super().__init__()
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+        self.idx = torch.arange(0, self.d_k, 2)
+        inv_freq = self.theta ** (-self.idx / self.d_k)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+    
+    def forward(self, x, token_position):
+        x_even = x[..., ::2]
+        x_odd  = x[..., 1::2]
+        angle = token_position[:, None] * self.inv_freq[None, :]
+        cos = angle.cos()
+        sin = angle.sin()
+        cos = cos[None, None, :, :]
+        sin = sin[None, None, :, :]
+        y_even = x_even * cos - x_odd * sin
+        y_odd  = x_even * sin + x_odd * cos
+        y = torch.empty_like(x)
+        y[..., ::2] = y_even
+        y[..., 1::2] = y_odd
+        return y
+
+
+def my_softmax(x, i):
+    max_val = torch.max(x)
+    return torch.exp(x-max_val)/torch.sum(torch.exp(x-max_val),dim=i, keepdim=True)
+
+
+def my_scale_dot_product_attention(Q, K ,V, mask):
+    scaled_dot_product = torch.einsum("bsnd,bsmd->bsnm", Q,K)/math.sqrt(Q.shape[-1])
+    masked = scaled_dot_product.masked_fill(~mask, float("-inf"))
+    softmax_res = my_softmax(masked,-1)
+    return torch.einsum("bsnm,bsmd->bsnd", softmax_res, V)
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.Wq = MyLinear(d_model, d_model)
+        self.Wk = MyLinear(d_model, d_model)
+        self.Wv = MyLinear(d_model, d_model)
+        self.Wo = MyLinear(d_model, d_model)
+
+    def forward(self, x):
+        B, S, D = x.shape
+        H = self.num_heads
+
+        q = self.Wq(x).view(B, S, H, self.d_k).transpose(1, 2)
+        k = self.Wk(x).view(B, S, H, self.d_k).transpose(1, 2)
+        v = self.Wv(x).view(B, S, H, self.d_k).transpose(1, 2)
+        mask = torch.tril(torch.ones(S, S, device=x.device, dtype=torch.bool))[None, None, :, :]
+        out = my_scale_dot_product_attention(q, k, v, mask)
+        out = out.transpose(1,2).contiguous()
+        out = out.view(B,S,D)
+        return self.Wo(out)
+
+class MultiHeadSelfAttentionWithRope(nn.Module):
+    def __init__(self, d_model, num_heads, max_seq_len,theta=10000.0):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.Wq = MyLinear(d_model, d_model)
+        self.Wk = MyLinear(d_model, d_model)
+        self.Wv = MyLinear(d_model, d_model)
+        self.Wo = MyLinear(d_model, d_model)
+
+        self.rope = MyRoPE(theta=theta, d_k=self.d_k, max_seq_len=max_seq_len)
+
+    def forward(self, x):
+        B, S, D = x.shape
+        H = self.num_heads
+
+        q = self.Wq(x).view(B, S, H, self.d_k).transpose(1, 2)
+        k = self.Wk(x).view(B, S, H, self.d_k).transpose(1, 2)
+        v = self.Wv(x).view(B, S, H, self.d_k).transpose(1, 2)
+        
+        positions = torch.arange(S, device=x.device)
+
+        q = self.rope(q, positions)
+        k = self.rope(k, positions)
+
+        mask = torch.tril(
+            torch.ones(S, S, device=x.device, dtype=torch.bool)
+        )[None, None, :, :]
+
+        out = my_scale_dot_product_attention(q, k, v, mask)
+        out = out.transpose(1, 2).contiguous()
+        out = out.view(B, S, D)
+        return self.Wo(out)
+
+class MyTransformerBlock(nn.Module):
+
+    def __init__(self, d_model, num_heads, d_ff, max_seq_len, theta):
+        super().__init__()
+        self.ffn = MySwiGLU(d_model, d_ff)
+        self.ln1 = MyRMSNorm(d_model)
+        self.ln2 = MyRMSNorm(d_model)
+        self.attn = MultiHeadSelfAttentionWithRope(d_model, num_heads, max_seq_len,theta)
+
+    
+    def forward(self, x):
+        y_hat = x+ self.attn(self.ln1(x))
+        y_hat = y_hat + self.ffn(self.ln2(y_hat))
+        return y_hat
+
+class MyLLM(nn.Module):
+
+    def __init__(self, vocab_size, d_model, context_length, num_layers, num_heads, d_ff, rope_theta):
+        super().__init__()
+        self.embedding = MyEmbedding(vocab_size, d_model)
+        
+        self.layers = nn.ModuleList([
+            MyTransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                max_seq_len=context_length,
+                theta=rope_theta
+            )
+            for _ in range(num_layers)
+        ])
+
+        self.ln_final = MyRMSNorm(d_model)
+        self.lm_head = MyLinear(d_model, vocab_size)
+    
+    def forward(self, input_ids):
+
+        x = self.embedding(input_ids) 
+        for block in self.layers:
+            x = block(x)
+
+        x = self.ln_final(x)
+        logits = self.lm_head(x)
+
+        return logits
+
+
