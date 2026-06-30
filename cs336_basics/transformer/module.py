@@ -1,6 +1,11 @@
 import torch
 from torch import nn
 import math
+from collections.abc import Callable, Iterable
+from typing import IO, BinaryIO, Optional
+import numpy.typing as npt
+import numpy as np
+import os
 
 
 class MyLinear(torch.nn.Module):
@@ -67,7 +72,7 @@ class MyRMSNorm(torch.nn.Module):
         self.d_model = d_model
         self.eps = eps
         self.gain = nn.Parameter(
-            torch.empty(
+            torch.ones(
                 d_model,
                 device=device,
                 dtype=dtype,
@@ -122,6 +127,24 @@ class MySwiGLU(torch.nn.Module):
                 dtype=dtype,
             )
         )
+    
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for weight in [self.w1, self.w2, self.w3]:
+            out_features, in_features = weight.shape
+
+            std = math.sqrt(
+                2.0 / (in_features + out_features)
+            )
+
+            torch.nn.init.trunc_normal_(
+                weight,
+                mean=0.0,
+                std=std,
+                a=-3 * std,
+                b=3 * std,
+            )
     
     def forward(self, x:torch.Tensor):
         gate = self.silu.forward(torch.einsum("fd,btd->btf",self.w1, x))
@@ -276,3 +299,145 @@ class MyLLM(nn.Module):
         return logits
 
 
+
+def my_cross_entropy(inputs, targets):
+
+    B = inputs.shape[0]
+
+    loss = (
+        torch.logsumexp(
+            inputs,
+            dim=1,
+        )
+        -
+        inputs[
+            torch.arange(B),
+            targets,
+        ]
+    )
+
+    return loss.mean()
+
+
+
+class MyAdamw(torch.optim.Optimizer):
+    def __init__(self, params, lr=0.0001, weight_decay=0, eps=0, betas=(0.9,0.99)):
+        
+        defaults = { "lr":lr, "eps":eps, "betas": betas, "weight_decay": weight_decay}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = None if closure is None else closure()
+        
+        for group in self.param_groups:
+            lr = group["lr"] # Get the learning rate.
+            beta_1 = group['betas'][0]
+            beta_2 = group['betas'][1]
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+
+            for pa in group["params"]:
+                if pa.grad is None:
+                    continue
+                
+                g = pa.grad.data # Get the gradient of loss with respect to p.
+                
+                state = self.state[pa] # Get state associated with p.
+                t = state.get("t", 1)
+                lr_t = lr * math.sqrt((1 - beta_2** t)) / (1 - beta_1**t)
+                
+                pa.data = pa.data - lr * weight_decay * pa.data
+                m = state.get("m", torch.zeros_like(pa)) 
+                v = state.get("v", torch.zeros_like(pa))
+                
+                m.data = beta_1*m.data + (1 - beta_1) * g
+                v.data = beta_2*v.data + (1 - beta_2) * g**2
+                pa.data = pa.data - lr_t * m.data / (torch.sqrt(v.data) + eps)
+
+                state["m"] = m
+                state["v"] = v
+                state["t"] = t + 1
+        return loss
+    
+def my_lr_cosine_learning_schedule(t, lr_max, lr_min, Tw, Tc):
+    if t < Tw:
+        return t/Tw*lr_max
+    elif Tw<=t and t <= Tc:
+        return lr_min + 0.5 *(1+math.cos((t-Tw)/(Tc-Tw)*math.pi)) * (lr_max - lr_min)
+    else:
+        return lr_min
+
+def my_gradient_clipping(parameters, max_l2_norm):
+    parameters = list(parameters)
+
+    grads = [
+        p.grad
+        for p in parameters
+        if p.grad is not None
+    ]
+
+    if len(grads) == 0:
+        return
+
+    total_norm = torch.sqrt(
+        sum(
+            g.pow(2).sum()
+            for g in grads
+        )
+    )
+
+    clip_coef = max_l2_norm / (total_norm + 1e-6)
+
+    if clip_coef < 1:
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.mul_(clip_coef)
+
+def my_get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str):
+    starts = np.random.randint(
+        0,
+        len(dataset) - context_length,
+        size=batch_size,
+    )
+
+    idx = starts[:, None] + np.arange(context_length)
+
+    x = torch.as_tensor(
+        dataset[idx],
+        dtype=torch.long,
+        device=device,
+    )
+
+    y = torch.as_tensor(
+        dataset[idx + 1],
+        dtype=torch.long,
+        device=device,
+    )
+    return x, y
+
+def my_save_checkpoint(model: torch.nn.Module,optimizer: torch.optim.Optimizer,iteration: int,out: str | os.PathLike | BinaryIO | IO[bytes]):
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+
+    torch.save(
+        checkpoint,
+        out,
+    )
+
+def my_load_checkpoint(src: str | os.PathLike | BinaryIO | IO[bytes],model: torch.nn.Module,optimizer: torch.optim.Optimizer,) -> int:
+
+    checkpoint = torch.load(src)
+
+    model.load_state_dict(
+        checkpoint["model"]
+    )
+
+    optimizer.load_state_dict(
+        checkpoint["optimizer"]
+    )
+
+    return checkpoint["iteration"]
+  
