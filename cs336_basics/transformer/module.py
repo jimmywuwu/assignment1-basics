@@ -178,9 +178,20 @@ class MyRoPE(nn.Module):
         return y
 
 
-def my_softmax(x, i):
-    max_val = torch.max(x)
-    return torch.exp(x-max_val)/torch.sum(torch.exp(x-max_val),dim=i, keepdim=True)
+def my_softmax(x, dim):
+    max_val = torch.max(
+        x,
+        dim=dim,
+        keepdim=True,
+    ).values
+
+    exp_x = torch.exp(x - max_val)
+
+    return exp_x / torch.sum(
+        exp_x,
+        dim=dim,
+        keepdim=True,
+    )
 
 
 def my_scale_dot_product_attention(Q, K ,V, mask):
@@ -267,6 +278,21 @@ class MyTransformerBlock(nn.Module):
         y_hat = y_hat + self.ffn(self.ln2(y_hat))
         return y_hat
 
+class MyTransformerBlockWithoutPreNorm(nn.Module):
+
+    def __init__(self, d_model, num_heads, d_ff, max_seq_len, theta):
+        super().__init__()
+        self.ffn = MySwiGLU(d_model, d_ff)
+        #self.ln1 = MyRMSNorm(d_model)
+        #self.ln2 = MyRMSNorm(d_model)
+        self.attn = MultiHeadSelfAttentionWithRope(d_model, num_heads, max_seq_len,theta)
+
+    
+    def forward(self, x):
+        y_hat = x+ self.attn(x)
+        y_hat = y_hat + self.ffn(y_hat)
+        return y_hat
+
 class MyLLM(nn.Module):
 
     def __init__(self, vocab_size, d_model, context_length, num_layers, num_heads, d_ff, rope_theta):
@@ -298,30 +324,89 @@ class MyLLM(nn.Module):
 
         return logits
 
+class MyLLMWithoutPreNorm(nn.Module):
+
+    def __init__(self, vocab_size, d_model, context_length, num_layers, num_heads, d_ff, rope_theta):
+        super().__init__()
+        self.embedding = MyEmbedding(vocab_size, d_model)
+        
+        self.layers = nn.ModuleList([
+            MyTransformerBlockWithoutPreNorm(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                max_seq_len=context_length,
+                theta=rope_theta
+            )
+            for _ in range(num_layers)
+        ])
+
+        self.ln_final = MyRMSNorm(d_model)
+        self.lm_head = MyLinear(d_model, vocab_size)
+    
+    def forward(self, input_ids):
+
+        x = self.embedding(input_ids) 
+        for block in self.layers:
+            x = block(x)
+
+        x = self.ln_final(x)
+        logits = self.lm_head(x)
+
+        return logits
 
 
 def my_cross_entropy(inputs, targets):
+    """
+    Cross entropy for:
+      inputs:  (B, V) or (B, S, V)
+      targets: (B,)    or (B, S)
 
-    B = inputs.shape[0]
+    Returns:
+      scalar mean loss
+    """
+    # Case 1: inputs shape = (B, V), targets shape = (B,)
+    if inputs.dim() == 2:
+        B = inputs.shape[0]
 
-    loss = (
-        torch.logsumexp(
-            inputs,
-            dim=1,
+        loss = (
+            torch.logsumexp(inputs, dim=-1)
+            -
+            inputs[
+                torch.arange(B, device=inputs.device),
+                targets,
+            ]
         )
-        -
-        inputs[
-            torch.arange(B),
-            targets,
-        ]
-    )
 
-    return loss.mean()
+        return loss.mean()
+
+    # Case 2: inputs shape = (B, S, V), targets shape = (B, S)
+    elif inputs.dim() == 3:
+        B, S, V = inputs.shape
+
+        inputs_flat = inputs.reshape(B * S, V)
+        targets_flat = targets.reshape(B * S)
+
+        loss = (
+            torch.logsumexp(inputs_flat, dim=-1)
+            -
+            inputs_flat[
+                torch.arange(B * S, device=inputs.device),
+                targets_flat,
+            ]
+        )
+
+        return loss.mean()
+
+    else:
+        raise ValueError(
+            f"Expected inputs to have shape (B, V) or (B, S, V), got {inputs.shape}"
+        )
 
 
 
 class MyAdamw(torch.optim.Optimizer):
-    def __init__(self, params, lr=0.0001, weight_decay=0, eps=0, betas=(0.9,0.99)):
+    def __init__(self, params, lr=0.0001, weight_decay=0, eps=1e-8, betas=(0.9,0.99)):
         
         defaults = { "lr":lr, "eps":eps, "betas": betas, "weight_decay": weight_decay}
         super().__init__(params, defaults)

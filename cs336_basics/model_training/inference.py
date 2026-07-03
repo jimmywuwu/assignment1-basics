@@ -7,7 +7,8 @@ from pathlib import Path
 
 import torch
 
-from transformer.module import MyLLM
+from cs336_basics.transformer.module import MyLLM
+from tokenizers import Tokenizer
 
 
 def top_p_filtering(
@@ -233,11 +234,11 @@ def generate_text(
     top_p: float | None = None,
     device: str = "cpu",
 ) -> str:
-    prompt_ids = tokenizer.encode(prompt)
+    prompt_ids = tokenizer.encode(prompt).ids
 
     end_token_id = None
     if end_token is not None:
-        end_ids = tokenizer.encode(end_token)
+        end_ids = tokenizer.encode(end_token).ids
         if len(end_ids) != 1:
             raise ValueError(
                 f"end_token should encode to one token, got {end_ids}"
@@ -307,23 +308,23 @@ def main():
     # tokenizer = BPETokenizer.from_files(...)
     #
     # 請換成你自己的 tokenizer 初始化方式。
-    raise NotImplementedError(
-        "Please initialize your tokenizer here, then call generate_text(...)."
+    tokenizer = Tokenizer.from_file(
+        "data/tinystories/tokenizer.json"
     )
 
-    # text = generate_text(
-    #     model=model,
-    #     tokenizer=tokenizer,
-    #     prompt=args.prompt,
-    #     max_new_tokens=args.max_new_tokens,
-    #     context_length=args.context_length,
-    #     end_token=args.end_token,
-    #     temperature=args.temperature,
-    #     top_p=args.top_p,
-    #     device=args.device,
-    # )
-    #
-    # print(text)
+    text = generate_text(
+         model=model,
+         tokenizer=tokenizer,
+         prompt=args.prompt,
+         max_new_tokens=args.max_new_tokens,
+         context_length=args.context_length,
+         end_token=args.end_token,
+         temperature=args.temperature,
+         top_p=args.top_p,
+         device=args.device,
+    )
+
+    print(text)
 
 
 if __name__ == "__main__":

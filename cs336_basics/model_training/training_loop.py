@@ -10,6 +10,7 @@ from exp_log import ExperimentLogger
 from cs336_basics.transformer.module import (
     MyLLM,
     MyAdamw,
+    MyLLMWithoutPreNorm,
     my_cross_entropy,
     my_get_batch,
     my_gradient_clipping,
@@ -234,7 +235,7 @@ def main():
     vocab_size = 10000
     d_model = 512
     context_length = 256
-    num_layers = 4
+    num_layers = 10
     num_heads = 16
     d_ff = 1344
     rope_theta = 10000.0
@@ -243,7 +244,7 @@ def main():
         train_path="data/tinystories/train.bin",
         val_path="data/tinystories/val.bin",
 
-        batch_size=16,
+        batch_size=32,
         context_length=context_length,
 
         device=device,
@@ -267,7 +268,7 @@ def main():
         log_dir="runs",
     )
 
-    model = MyLLM(
+    model = MyLLMWithoutPreNorm(
         vocab_size=vocab_size,
         d_model=d_model,
         context_length=context_length,
@@ -276,11 +277,14 @@ def main():
         d_ff=d_ff,
         rope_theta=rope_theta,
     )
-    assert not torch.isnan(out).any()
-    
+
+    for name, p in model.named_parameters():
+        assert not torch.isnan(p).any(), f"{name} contains NaN"
+        assert not torch.isinf(p).any(), f"{name} contains Inf"    
+
     optimizer = MyAdamw(
         model.parameters(),
-        lr=0.0,              # 由 cosine scheduler 每 step 設定
+        lr=1e-6,              # 由 cosine scheduler 每 step 設定
         weight_decay=0.01,
         eps=1e-8,
         betas=(0.9, 0.999),
